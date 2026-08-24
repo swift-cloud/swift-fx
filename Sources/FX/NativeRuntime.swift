@@ -98,7 +98,7 @@ final class NativeRuntime: @unchecked Sendable {
                     onExit(fx_runtime_exit_code(runtime))
                     return
                 }
-                try? await Task.sleep(for: .milliseconds(2))
+                try? await Task.sleep(nanoseconds: 2_000_000)
             }
         }
     }
@@ -189,25 +189,56 @@ final class NativeRuntime: @unchecked Sendable {
         }
 
         do {
-            let (bytes, response) = try await session.bytes(for: request)
-            guard let http = response as? HTTPURLResponse, let runtime = currentPointer() else { return }
-            guard fx_runtime_start_fetch_response(runtime, Int32(handle), UInt16(http.statusCode)) == FX_FETCH_APPLIED else { return }
-            var chunk = Data()
-            chunk.reserveCapacity(64 * 1_024)
-            for try await byte in bytes {
-                try Task.checkCancellation()
-                chunk.append(byte)
-                if chunk.count == 64 * 1_024 {
-                    guard await push(chunk, handle: Int32(handle)) else { return }
-                    chunk.removeAll(keepingCapacity: true)
+            if #available(iOS 15.0, macOS 12.0, *) {
+                let (bytes, response) = try await session.bytes(for: request)
+                guard try await startResponse(response, handle: Int32(handle)) else { return }
+                var chunk = Data()
+                chunk.reserveCapacity(64 * 1_024)
+                for try await byte in bytes {
+                    try Task.checkCancellation()
+                    chunk.append(byte)
+                    if chunk.count == 64 * 1_024 {
+                        guard await push(chunk, handle: Int32(handle)) else { return }
+                        chunk.removeAll(keepingCapacity: true)
+                    }
+                }
+                if !chunk.isEmpty, !(await push(chunk, handle: Int32(handle))) { return }
+            } else {
+                let (data, response) = try await bufferedData(for: request)
+                guard try await startResponse(response, handle: Int32(handle)) else { return }
+                var offset = 0
+                while offset < data.count {
+                    try Task.checkCancellation()
+                    let end = min(offset + 64 * 1_024, data.count)
+                    guard await push(data.subdata(in: offset..<end), handle: Int32(handle)) else { return }
+                    offset = end
                 }
             }
-            if !chunk.isEmpty, !(await push(chunk, handle: Int32(handle))) { return }
             if let runtime = currentPointer() { _ = fx_runtime_finish_fetch(runtime, Int32(handle)) }
         } catch {
             if let runtime = currentPointer(), fx_runtime_fetch_active(runtime, Int32(handle)) {
                 _ = fx_runtime_fail_fetch(runtime, Int32(handle))
             }
+        }
+    }
+
+
+    private func startResponse(_ response: URLResponse, handle: Int32) async throws -> Bool {
+        guard let http = response as? HTTPURLResponse, let runtime = currentPointer() else { return false }
+        return fx_runtime_start_fetch_response(runtime, handle, UInt16(http.statusCode)) == FX_FETCH_APPLIED
+    }
+
+    private func bufferedData(for request: URLRequest) async throws -> (Data, URLResponse) {
+        try await withCheckedThrowingContinuation { continuation in
+            session.dataTask(with: request) { data, response, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else if let data, let response {
+                    continuation.resume(returning: (data, response))
+                } else {
+                    continuation.resume(throwing: RuntimeError.invalidFetch)
+                }
+            }.resume()
         }
     }
 
@@ -219,7 +250,7 @@ final class NativeRuntime: @unchecked Sendable {
             }
             if result == FX_FETCH_APPLIED { return true }
             if result == FX_FETCH_STALE { return false }
-            try? await Task.sleep(for: .milliseconds(2))
+            try? await Task.sleep(nanoseconds: 2_000_000)
         }
         return false
     }

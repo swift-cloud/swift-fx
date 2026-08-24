@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "swift-fx",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v14), .iOS(.v14)],
     products: [
         .library(name: "FX", targets: ["FX"]),
         .executable(name: "FXExample", targets: ["FXExample"]),

@@ -23,7 +23,7 @@ public struct FXConfiguration: Sendable {
 
     public static var defaultHome: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appending(path: "fx", directoryHint: .isDirectory)
+            .appendingPathComponent("fx", isDirectory: true)
     }
 }
 

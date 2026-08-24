@@ -54,7 +54,7 @@ public actor FXAgent {
         closed = true
         if let activeSessionID { await sessions[activeSessionID]?.markClosed() }
         runtime.closeInput()
-        try? await Task.sleep(for: .milliseconds(20))
+        try? await Task.sleep(nanoseconds: 20_000_000)
         runtime.stop()
         failPending(FXError.runtimeExited(0))
     }

@@ -1,10 +1,11 @@
 # swift-fx
 
-Swift bindings for [fx](https://github.com/vercel-labs/fx), a tiny native coding agent. The package embeds fx as a prebuilt universal macOS XCFramework and exposes a Swift concurrency API.
+Swift bindings for [fx](https://github.com/vercel-labs/fx), a tiny native coding agent. The package embeds fx as a prebuilt multi-platform Apple XCFramework and exposes a Swift concurrency API.
 
 ## Requirements
 
 - macOS 14 or later
+- iOS 14 or later
 - Swift 6.1 or later
 - A Vercel AI Gateway API key
 
@@ -53,7 +54,7 @@ await agent.close()
 
 Call `FXTurn.cancel()` to cancel an active turn. `FXAgent` and `FXSession` are actors.
 
-The initial release is headless and intentionally disables native tools and MCP. It supports durable sessions, streaming turns, model and mode configuration, cancellation, permission requests, and host-owned networking through `URLSession`.
+The package is headless and intentionally disables native tools and MCP. It supports durable sessions, streaming turns, model and mode configuration, cancellation, permission requests, and host-owned networking through `URLSession`.
 
 ## Development
 
@@ -68,6 +69,7 @@ cp Package.swift /tmp/Package.release.swift
 trap 'mv /tmp/Package.release.swift Package.swift' EXIT
 Scripts/use-local-artifact.sh
 swift run FXTests
+Scripts/test-ios-simulator.sh
 ```
 
 ## Releases

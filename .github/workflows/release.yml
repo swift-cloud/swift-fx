@@ -37,12 +37,16 @@ jobs:
       - name: Validate artifact
         run: |
           lipo -info Artifacts/FXCore.xcframework/macos-arm64_x86_64/CFX.framework/CFX | grep 'x86_64 arm64'
+          lipo -info Artifacts/FXCore.xcframework/ios-arm64_x86_64-simulator/CFX.framework/CFX | grep 'x86_64 arm64'
+          lipo -info Artifacts/FXCore.xcframework/ios-arm64/CFX.framework/CFX | grep 'arm64'
           test "$(swift package compute-checksum Artifacts/FXCore.xcframework.zip)" = "$(cat Artifacts/FXCore.xcframework.zip.sha256)"
       - name: Smoke-test local binary target
         run: |
           cp Package.swift /tmp/Package.release.swift
           Scripts/use-local-artifact.sh
           swift build
+          xcodebuild -scheme FX -destination 'generic/platform=iOS' build CODE_SIGNING_ALLOWED=NO
+          xcodebuild -scheme FX -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO
           swift run FXTests
           mv /tmp/Package.release.swift Package.swift
       - name: Update release manifest
