@@ -5,7 +5,7 @@ Swift bindings for [fx](https://github.com/vercel-labs/fx), a tiny native coding
 ## Requirements
 
 - macOS 14 or later
-- Swift 6.2 or later
+- Swift 6.1 or later
 - A Vercel AI Gateway API key
 
 ## Installation
