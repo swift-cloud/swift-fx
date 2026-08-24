@@ -10,8 +10,8 @@ let package = Package(
     targets: [
         .binaryTarget(
             name: "CFX",
-            url: "https://github.com/swift-cloud/swift-fx/releases/download/0.1.0/FXCore.xcframework.zip",
-            checksum: "37b06d9ac720ef09968a709816d2538e234429986f040c323b5f4edd0bdbe29a"
+            url: "https://github.com/swift-cloud/swift-fx/releases/download/0.2.0/FXCore.xcframework.zip",
+            checksum: "336989dd287a9984f1b921439c642f972ffaf93c1838470c8a9f1f02322ff40e"
         ),
         .target(name: "FX", dependencies: ["CFX"]),
     ]
