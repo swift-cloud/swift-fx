@@ -25,6 +25,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
+      - name: Install LLVM archive tools
+        run: brew install llvm
       - name: Validate version
         env:
           VERSION: ${{ inputs.version }}
