@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - name: Build XCFramework
+        run: Scripts/build-xcframework.sh
+      - name: Validate artifact
+        run: |
+          lipo -info Artifacts/FXCore.xcframework/macos-arm64_x86_64/CFX.framework/CFX | grep 'x86_64 arm64'
+          test "$(swift package compute-checksum Artifacts/FXCore.xcframework.zip)" = "$(cat Artifacts/FXCore.xcframework.zip.sha256)"
+      - name: Use local binary target
+        run: Scripts/use-local-artifact.sh
+      - name: Build Swift package
+        run: swift build
+      - name: Exercise embedded runtime
+        run: swift run FXTests

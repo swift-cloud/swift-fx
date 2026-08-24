@@ -1,0 +1,967 @@
+diff --git a/build.zig b/build.zig
+index fd3d014..a4f3c8b 100644
+--- a/build.zig
++++ b/build.zig
+@@ -20,6 +20,11 @@ const NapiSurface = enum {
+     core,
+ };
+ 
++const CApiSurface = enum {
++    none,
++    core,
++};
++
+ pub fn build(b: *std.Build) void {
+     const target = b.standardTargetOptions(.{});
+     const optimize = b.standardOptimizeOption(.{});
+@@ -38,6 +43,11 @@ pub fn build(b: *std.Build) void {
+         "napi-surface",
+         "Build a Node-API addon surface (core)",
+     ) orelse .none;
++    const c_api_surface = b.option(
++        CApiSurface,
++        "c-api-surface",
++        "Build a native C ABI surface (core)",
++    ) orelse .none;
+ 
+     const git_commit = readGitCommit(b);
+     const app_version = readAppVersion(b);
+@@ -96,6 +106,9 @@ pub fn build(b: *std.Build) void {
+     if (napi_surface != .none) {
+         addNapiArtifact(b, napi_surface, target, git_commit, app_version, update_channel);
+     }
++    if (c_api_surface != .none) {
++        addCApiArtifact(b, c_api_surface, target, git_commit, app_version, update_channel);
++    }
+ 
+     const mcp_test_exports = b.createModule(.{
+         .root_source_file = b.path("src/mcp_test_exports.zig"),
+@@ -409,6 +422,47 @@ fn addNapiArtifact(
+     b.getInstallStep().dependOn(&install.step);
+ }
+ 
++fn addCApiArtifact(
++    b: *std.Build,
++    surface: CApiSurface,
++    target: std.Build.ResolvedTarget,
++    git_commit: []const u8,
++    app_version: []const u8,
++    update_channel: UpdateChannel,
++) void {
++    const options = b.addOptions();
++    options.addOption([]const u8, "git_commit", git_commit);
++    options.addOption([]const u8, "app_version", app_version);
++    options.addOption([]const u8, "update_channel", @tagName(update_channel));
++
++    const root = switch (surface) {
++        .core => "src/c_api_core_main.zig",
++        .none => unreachable,
++    };
++    const lib = b.addLibrary(.{
++        .name = "fxcore",
++        .linkage = .static,
++        .root_module = b.createModule(.{
++            .root_source_file = b.path(root),
++            .target = target,
++            .optimize = .ReleaseSafe,
++            .link_libc = true,
++        }),
++    });
++    lib.root_module.addImport("build_options", options.createModule());
++    lib.bundle_compiler_rt = true;
++    const install = b.addInstallArtifact(lib, .{});
++    const install_header = b.addInstallHeaderFile(
++        b.path("sdk/swift/Sources/CFX/include/fx.h"),
++        "fx.h",
++    );
++    const step = b.step("libfx-c", "Build the native libfx C ABI core");
++    step.dependOn(&install.step);
++    step.dependOn(&install_header.step);
++    b.getInstallStep().dependOn(&install.step);
++    b.getInstallStep().dependOn(&install_header.step);
++}
++
+ fn discoverNodeIncludeDir(b: *std.Build) []const u8 {
+     var code: u8 = 0;
+     const out = b.runAllowFail(
+diff --git a/sdk/swift/Sources/CFX/include/fx.h b/sdk/swift/Sources/CFX/include/fx.h
+new file mode 100644
+index 0000000..1693e32
+--- /dev/null
++++ b/sdk/swift/Sources/CFX/include/fx.h
+@@ -0,0 +1,68 @@
++#ifndef LIBFX_H
++#define LIBFX_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define FX_ABI_VERSION 1u
++
++typedef struct fx_runtime fx_runtime_t;
++
++typedef enum fx_status {
++    FX_OK = 0,
++    FX_ERROR_INVALID_ARGUMENT = -1,
++    FX_ERROR_LIMIT = -2,
++    FX_ERROR_OUT_OF_MEMORY = -3,
++    FX_ERROR_THREAD = -4,
++    FX_ERROR_BACKPRESSURE = -5,
++    FX_ERROR_CLOSED = -6,
++    FX_ERROR_BUFFER_TOO_SMALL = -7,
++    FX_ERROR_STALE = -8
++} fx_status_t;
++
++typedef enum fx_fetch_result {
++    FX_FETCH_STALE = 0,
++    FX_FETCH_APPLIED = 1,
++    FX_FETCH_BACKPRESSURE = 2
++} fx_fetch_result_t;
++
++typedef struct fx_runtime_options {
++    uint32_t abi_version;
++    const uint8_t *credential;
++    size_t credential_length;
++    const uint8_t *model;
++    size_t model_length;
++    const uint8_t *home;
++    size_t home_length;
++    const uint8_t *workspace_root;
++    size_t workspace_root_length;
++    const uint8_t *gateway_chat_url;
++    size_t gateway_chat_url_length;
++} fx_runtime_options_t;
++
++uint32_t fx_abi_version(void);
++fx_status_t fx_runtime_create(const fx_runtime_options_t *options, fx_runtime_t **runtime_out);
++fx_status_t fx_runtime_write(fx_runtime_t *runtime, const uint8_t *bytes, size_t length);
++void fx_runtime_close_input(fx_runtime_t *runtime);
++void fx_runtime_abort_fetch(fx_runtime_t *runtime);
++size_t fx_runtime_output_available(fx_runtime_t *runtime);
++size_t fx_runtime_drain(fx_runtime_t *runtime, uint8_t *destination, size_t capacity);
++ptrdiff_t fx_runtime_take_fetch(fx_runtime_t *runtime, uint8_t *destination, size_t capacity);
++bool fx_runtime_fetch_active(fx_runtime_t *runtime, int32_t fetch_handle);
++fx_fetch_result_t fx_runtime_start_fetch_response(fx_runtime_t *runtime, int32_t fetch_handle, uint16_t status);
++fx_fetch_result_t fx_runtime_push_fetch_response(fx_runtime_t *runtime, int32_t fetch_handle, const uint8_t *bytes, size_t length);
++fx_fetch_result_t fx_runtime_finish_fetch(fx_runtime_t *runtime, int32_t fetch_handle);
++fx_fetch_result_t fx_runtime_fail_fetch(fx_runtime_t *runtime, int32_t fetch_handle);
++bool fx_runtime_exited(fx_runtime_t *runtime);
++uint8_t fx_runtime_exit_code(fx_runtime_t *runtime);
++void fx_runtime_destroy(fx_runtime_t *runtime);
++
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/src/acp/sessions.zig b/src/acp/sessions.zig
+index 6d45fc1..a57079c 100644
+--- a/src/acp/sessions.zig
++++ b/src/acp/sessions.zig
+@@ -896,10 +896,10 @@ fn handleLoadFailure(
+ }
+ 
+ pub fn handleListSessions(state: *server.ServerState, alloc: Allocator, msg: *jsonrpc.Message) !void {
+-    var store = session_store.Store.initReadOnly(
+-        alloc,
+-        state.workspace_root,
+-    ) catch {
++    var store = (if (state.cfg.home_override) |home|
++        session_store.Store.initReadOnlyFromHome(alloc, home, state.workspace_root)
++    else
++        session_store.Store.initReadOnly(alloc, state.workspace_root)) catch {
+         try state.writer.writeResponse(alloc, msg.id, "{\"sessions\":[]}");
+         return;
+     };
+diff --git a/src/c_api_core_main.zig b/src/c_api_core_main.zig
+new file mode 100644
+index 0000000..1a7ba06
+--- /dev/null
++++ b/src/c_api_core_main.zig
+@@ -0,0 +1,126 @@
++const std = @import("std");
++const embedded = @import("core/embedding/runtime.zig");
++
++const Runtime = embedded.Runtime;
++
++pub export fn fx_abi_version() callconv(.c) u32 {
++    return embedded.abi_version;
++}
++
++const Options = extern struct {
++    abi_version: u32,
++    credential: ?[*]const u8,
++    credential_length: usize,
++    model: ?[*]const u8,
++    model_length: usize,
++    home: ?[*]const u8,
++    home_length: usize,
++    workspace_root: ?[*]const u8,
++    workspace_root_length: usize,
++    gateway_chat_url: ?[*]const u8,
++    gateway_chat_url_length: usize,
++};
++
++fn required(ptr: ?[*]const u8, len: usize) ?[]const u8 {
++    if (ptr == null or len == 0) return null;
++    return ptr.?[0..len];
++}
++
++fn optional(ptr: ?[*]const u8, len: usize) ?[]const u8 {
++    if (len == 0) return null;
++    if (ptr == null) return null;
++    return ptr.?[0..len];
++}
++
++pub export fn fx_runtime_create(options: ?*const Options, runtime_out: ?*?*Runtime) callconv(.c) i32 {
++    const opts = options orelse return -1;
++    const out = runtime_out orelse return -1;
++    out.* = null;
++    if (opts.abi_version != embedded.abi_version) return -1;
++    const runtime = embedded.create(.{
++        .credential = required(opts.credential, opts.credential_length) orelse return -1,
++        .model = optional(opts.model, opts.model_length),
++        .home = required(opts.home, opts.home_length) orelse return -1,
++        .workspace_root = required(opts.workspace_root, opts.workspace_root_length) orelse return -1,
++        .gateway_chat_url = optional(opts.gateway_chat_url, opts.gateway_chat_url_length),
++    }) catch |err| return switch (err) {
++        error.TooManyRuntimes => -2,
++        error.OutOfMemory => -3,
++        error.ThreadFailed => -4,
++        else => -1,
++    };
++    out.* = runtime;
++    return 0;
++}
++
++pub export fn fx_runtime_write(runtime: ?*Runtime, bytes: ?[*]const u8, length: usize) callconv(.c) i32 {
++    const value = runtime orelse return -1;
++    if (length > 0 and bytes == null) return -1;
++    embedded.write(value, if (length == 0) &.{} else bytes.?[0..length]) catch |err| return switch (err) {
++        error.InputClosed => -6,
++        error.InputQueueFull => -5,
++        error.OutOfMemory => -3,
++    };
++    return 0;
++}
++
++pub export fn fx_runtime_close_input(runtime: ?*Runtime) callconv(.c) void {
++    if (runtime) |value| embedded.closeInput(value);
++}
++
++pub export fn fx_runtime_abort_fetch(runtime: ?*Runtime) callconv(.c) void {
++    if (runtime) |value| embedded.abortFetch(value);
++}
++
++pub export fn fx_runtime_output_available(runtime: ?*Runtime) callconv(.c) usize {
++    return if (runtime) |value| embedded.outputAvailable(value) else 0;
++}
++
++pub export fn fx_runtime_drain(runtime: ?*Runtime, destination: ?[*]u8, capacity: usize) callconv(.c) usize {
++    const value = runtime orelse return 0;
++    if (capacity == 0 or destination == null) return 0;
++    return embedded.drain(value, destination.?[0..capacity]);
++}
++
++pub export fn fx_runtime_take_fetch(runtime: ?*Runtime, destination: ?[*]u8, capacity: usize) callconv(.c) isize {
++    const value = runtime orelse return 0;
++    return embedded.takeFetch(value, if (capacity == 0 or destination == null) &.{} else destination.?[0..capacity]);
++}
++
++pub export fn fx_runtime_fetch_active(runtime: ?*Runtime, handle: i32) callconv(.c) bool {
++    return if (runtime) |value| embedded.fetchActive(value, handle) else false;
++}
++
++fn fetchResult(value: embedded.FetchOperationResult) u8 {
++    return @intFromEnum(value);
++}
++
++pub export fn fx_runtime_start_fetch_response(runtime: ?*Runtime, handle: i32, status: u16) callconv(.c) u8 {
++    return if (runtime) |value| fetchResult(embedded.startFetch(value, handle, status)) else 0;
++}
++
++pub export fn fx_runtime_push_fetch_response(runtime: ?*Runtime, handle: i32, bytes: ?[*]const u8, length: usize) callconv(.c) u8 {
++    const value = runtime orelse return 0;
++    if (length > 0 and bytes == null) return 0;
++    return fetchResult(embedded.pushFetch(value, handle, if (length == 0) &.{} else bytes.?[0..length]) catch return 2);
++}
++
++pub export fn fx_runtime_finish_fetch(runtime: ?*Runtime, handle: i32) callconv(.c) u8 {
++    return if (runtime) |value| fetchResult(embedded.finishFetch(value, handle)) else 0;
++}
++
++pub export fn fx_runtime_fail_fetch(runtime: ?*Runtime, handle: i32) callconv(.c) u8 {
++    return if (runtime) |value| fetchResult(embedded.failFetch(value, handle)) else 0;
++}
++
++pub export fn fx_runtime_exited(runtime: ?*Runtime) callconv(.c) bool {
++    return if (runtime) |value| embedded.exited(value) else true;
++}
++
++pub export fn fx_runtime_exit_code(runtime: ?*Runtime) callconv(.c) u8 {
++    return if (runtime) |value| embedded.exitCode(value) else 1;
++}
++
++pub export fn fx_runtime_destroy(runtime: ?*Runtime) callconv(.c) void {
++    if (runtime) |value| embedded.destroy(value);
++}
+diff --git a/src/core/embedding/runtime.zig b/src/core/embedding/runtime.zig
+new file mode 100644
+index 0000000..0e8cca7
+--- /dev/null
++++ b/src/core/embedding/runtime.zig
+@@ -0,0 +1,650 @@
++const std = @import("std");
++const build_options = @import("build_options");
++const acp_server = @import("../../acp/server.zig");
++const jsonrpc = @import("../../acp/jsonrpc.zig");
++const background_process_provider = @import("../execution/background_process_provider.zig");
++const gateway_provider = @import("../gateway/gateway_provider.zig");
++const provider_set = @import("../gateway/provider_set.zig");
++const host = @import("../hosts/host.zig");
++const debug_trace = @import("../shared/debug_trace.zig");
++const io_mod = @import("../shared/io.zig");
++const fetch_state = @import("../../napi_fetch_state.zig");
++const streamable_http = @import("../mcp/streamable_http.zig");
++const host_stream_provider = @import("../../gateway/host_stream_provider.zig");
++const oauth_transport = @import("../auth/oauth_transport.zig");
++const builtin_context = @import("../../builtins/context.zig");
++const builtin_gateway = @import("../../builtins/gateway.zig");
++const builtin_modes = @import("../../builtins/modes.zig");
++
++const Allocator = std.mem.Allocator;
++const max_input_bytes = 8 * 1024 * 1024;
++const max_output_bytes = 8 * 1024 * 1024;
++const max_fetch_request_bytes = 8 * 1024 * 1024;
++const max_fetch_response_bytes = 8 * 1024 * 1024;
++const max_api_key_bytes = 64 * 1024;
++const max_model_bytes = 1024;
++const max_path_bytes = 16 * 1024;
++const max_url_bytes = 16 * 1024;
++const max_active_runtimes = 64;
++const InputQueue = struct {
++    mutex: std.Io.Mutex = .init,
++    wake: std.Io.Condition = .init,
++    bytes: std.ArrayList(u8) = .empty,
++    offset: usize = 0,
++    closed: bool = false,
++
++    fn read(self: *InputQueue, alloc: Allocator, destination: []u8) usize {
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        while (self.offset == self.bytes.items.len and !self.closed) {
++            self.bytes.clearRetainingCapacity();
++            self.offset = 0;
++            self.wake.waitUncancelable(io, &self.mutex);
++        }
++        const available = self.bytes.items.len - self.offset;
++        if (available == 0) return 0;
++        const len = @min(destination.len, available);
++        @memcpy(destination[0..len], self.bytes.items[self.offset..][0..len]);
++        self.offset += len;
++        if (self.offset == self.bytes.items.len) {
++            self.bytes.clearRetainingCapacity();
++            self.offset = 0;
++        }
++        _ = alloc;
++        return len;
++    }
++
++    fn write(self: *InputQueue, alloc: Allocator, data: []const u8) !void {
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        if (self.closed) return error.InputClosed;
++        const queued = self.bytes.items.len - self.offset;
++        if (data.len > max_input_bytes or queued > max_input_bytes - data.len) return error.InputQueueFull;
++        if (self.offset > 0) {
++            std.mem.copyForwards(u8, self.bytes.items[0..queued], self.bytes.items[self.offset..]);
++            self.bytes.items.len = queued;
++            self.offset = 0;
++        }
++        try self.bytes.appendSlice(alloc, data);
++        self.wake.signal(io);
++    }
++
++    fn close(self: *InputQueue) void {
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        self.closed = true;
++        self.wake.broadcast(io);
++        self.mutex.unlock(io);
++    }
++
++    fn deinit(self: *InputQueue, alloc: Allocator) void {
++        self.bytes.deinit(alloc);
++    }
++};
++
++const OutputQueue = struct {
++    mutex: std.Io.Mutex = .init,
++    bytes: std.ArrayList(u8) = .empty,
++    offset: usize = 0,
++
++    fn write(self: *OutputQueue, alloc: Allocator, data: []const u8) !void {
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        const queued = self.bytes.items.len - self.offset;
++        if (data.len > max_output_bytes or queued > max_output_bytes - data.len) return error.OutputQueueFull;
++        if (self.offset > 0) {
++            std.mem.copyForwards(u8, self.bytes.items[0..queued], self.bytes.items[self.offset..]);
++            self.bytes.items.len = queued;
++            self.offset = 0;
++        }
++        try self.bytes.appendSlice(alloc, data);
++    }
++
++    fn drain(self: *OutputQueue, destination: []u8) usize {
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        const available_bytes = self.bytes.items.len - self.offset;
++        const len = @min(destination.len, available_bytes);
++        if (len == 0) return 0;
++        @memcpy(destination[0..len], self.bytes.items[self.offset..][0..len]);
++        self.offset += len;
++        if (self.offset == self.bytes.items.len) {
++            self.bytes.clearRetainingCapacity();
++            self.offset = 0;
++        }
++        return len;
++    }
++
++    fn available(self: *OutputQueue) usize {
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        return self.bytes.items.len - self.offset;
++    }
++
++    fn deinit(self: *OutputQueue, alloc: Allocator) void {
++        self.bytes.deinit(alloc);
++    }
++};
++
++const FetchBridge = struct {
++    mutex: std.Io.Mutex = .init,
++    wake: std.Io.Condition = .init,
++    request: std.ArrayList(u8) = .empty,
++    response: std.ArrayList(u8) = .empty,
++    response_offset: usize = 0,
++    phase: fetch_state.Phase = .idle,
++    next_handle: fetch_state.Handle = 1,
++    status: u16 = 0,
++
++    fn clearPendingRequest(self: *FetchBridge, reason: []const u8) void {
++        if (self.request.items.len == 0) return;
++        debug_trace.logf("napi", "dropping pending host fetch reason={s} bytes={d}", .{ reason, self.request.items.len });
++        self.request.clearRetainingCapacity();
++    }
++
++    fn trace_stale(operation: []const u8, handle: fetch_state.Handle, reason: fetch_state.StaleReason) void {
++        debug_trace.logf(
++            "napi",
++            "dropping stale host fetch operation={s} handle={d} reason={s}",
++            .{ operation, handle, @tagName(reason) },
++        );
++    }
++
++    fn advance_handle(self: *FetchBridge) void {
++        self.next_handle = if (self.next_handle == std.math.maxInt(fetch_state.Handle))
++            0
++        else
++            self.next_handle + 1;
++    }
++
++    fn open(raw: ?*anyopaque, method: []const u8, url: []const u8, headers: []const u8, body: []const u8) !i32 {
++        const self: *FetchBridge = @ptrCast(@alignCast(raw.?));
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        if (self.next_handle == 0) return error.HostStreamUnavailable;
++        const handle = self.next_handle;
++        const decision = fetch_state.decide(self.phase, .{ .open = handle });
++        switch (decision.action) {
++            .cancelled => {
++                self.phase = decision.phase;
++                return error.Cancelled;
++            },
++            .unavailable, .shutting_down => return error.HostStreamUnavailable,
++            .applied => {},
++            else => unreachable,
++        }
++        self.response_offset = 0;
++        self.response.clearRetainingCapacity();
++        var writer: std.Io.Writer.Allocating = .init(std.heap.c_allocator);
++        defer writer.deinit();
++        const encoded_body = std.base64.standard.Encoder.calcSize(body.len);
++        const body_base64 = try std.heap.c_allocator.alloc(u8, encoded_body);
++        defer std.heap.c_allocator.free(body_base64);
++        _ = std.base64.standard.Encoder.encode(body_base64, body);
++        try std.json.Stringify.value(.{
++            .handle = handle,
++            .method = method,
++            .url = url,
++            .headers = headers,
++            .body = body_base64,
++        }, .{}, &writer.writer);
++        const bytes = writer.writer.buffered();
++        if (bytes.len > max_fetch_request_bytes) return error.HostStreamBackpressure;
++        self.request.clearRetainingCapacity();
++        try self.request.appendSlice(std.heap.c_allocator, bytes);
++        self.phase = decision.phase;
++        self.advance_handle();
++        self.wake.broadcast(io);
++        return handle;
++    }
++
++    fn statusFn(raw: ?*anyopaque, handle: i32, status_out: *u16) i32 {
++        const self: *FetchBridge = @ptrCast(@alignCast(raw.?));
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        while (true) switch (self.phase) {
++            .request_pending, .awaiting_response => |active| {
++                if (active != handle) return -2;
++                self.wake.waitUncancelable(io, &self.mutex);
++            },
++            .streaming => |active| {
++                if (active != handle) return -2;
++                status_out.* = self.status;
++                return 1;
++            },
++            .terminal => |terminal| {
++                if (terminal.handle != handle) return -2;
++                return switch (terminal.kind) {
++                    .success => result: {
++                        status_out.* = self.status;
++                        break :result 1;
++                    },
++                    .failure => -1,
++                    .aborted => -2,
++                };
++            },
++            else => return -2,
++        };
++    }
++
++    fn next(raw: ?*anyopaque, handle: i32, out: []u8) i32 {
++        const self: *FetchBridge = @ptrCast(@alignCast(raw.?));
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        while (true) {
++            const terminal_kind: ?fetch_state.TerminalKind = switch (self.phase) {
++                .streaming => |active| if (active == handle) null else return -2,
++                .terminal => |terminal| if (terminal.handle == handle) terminal.kind else return -2,
++                else => return -2,
++            };
++            if (terminal_kind) |kind| switch (kind) {
++                .failure => return -1,
++                .aborted => return -2,
++                .success => {},
++            };
++            const available = self.response.items.len - self.response_offset;
++            if (available > 0) {
++                const len = @min(out.len, available);
++                @memcpy(out[0..len], self.response.items[self.response_offset..][0..len]);
++                self.response_offset += len;
++                self.wake.broadcast(io);
++                return @intCast(len);
++            }
++            self.response.clearRetainingCapacity();
++            self.response_offset = 0;
++            if (terminal_kind != null) return 0;
++            self.wake.waitUncancelable(io, &self.mutex);
++        }
++    }
++
++    fn close(raw: ?*anyopaque, handle: i32) void {
++        const self: *FetchBridge = @ptrCast(@alignCast(raw.?));
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        const decision = fetch_state.decide(self.phase, .{ .close = handle });
++        if (decision.action == .stale) {
++            trace_stale("close", handle, decision.stale_reason.?);
++            return;
++        }
++        self.clearPendingRequest("stream_close");
++        self.phase = decision.phase;
++        self.status = 0;
++        self.response.clearRetainingCapacity();
++        self.response_offset = 0;
++        self.wake.broadcast(io);
++    }
++
++    fn startResponse(self: *FetchBridge, handle: fetch_state.Handle, status: u16) FetchOperationResult {
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        const decision = fetch_state.decide(self.phase, .{ .start = handle });
++        if (decision.action == .stale) {
++            trace_stale("start", handle, decision.stale_reason.?);
++            return .stale;
++        }
++        self.status = status;
++        self.phase = decision.phase;
++        self.wake.broadcast(io);
++        return .applied;
++    }
++
++    fn pushResponse(self: *FetchBridge, handle: fetch_state.Handle, data: []const u8) !FetchOperationResult {
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        const decision = fetch_state.decide(self.phase, .{ .push = handle });
++        if (decision.action == .stale) {
++            trace_stale("push", handle, decision.stale_reason.?);
++            return .stale;
++        }
++        const queued = self.response.items.len - self.response_offset;
++        if (data.len > max_fetch_response_bytes or queued > max_fetch_response_bytes - data.len) return .backpressure;
++        if (self.response_offset > 0) {
++            std.mem.copyForwards(u8, self.response.items[0..queued], self.response.items[self.response_offset..]);
++            self.response.items.len = queued;
++            self.response_offset = 0;
++        }
++        try self.response.appendSlice(std.heap.c_allocator, data);
++        self.wake.broadcast(io);
++        return .applied;
++    }
++
++    fn finishResponse(self: *FetchBridge, handle: fetch_state.Handle) FetchOperationResult {
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        const decision = fetch_state.decide(self.phase, .{ .finish = handle });
++        if (decision.action == .stale) {
++            trace_stale("finish", handle, decision.stale_reason.?);
++            return .stale;
++        }
++        self.phase = decision.phase;
++        self.wake.broadcast(io);
++        return .applied;
++    }
++
++    fn failResponse(self: *FetchBridge, handle: fetch_state.Handle) FetchOperationResult {
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        const decision = fetch_state.decide(self.phase, .{ .fail = handle });
++        if (decision.action == .stale) {
++            trace_stale("fail", handle, decision.stale_reason.?);
++            return .stale;
++        }
++        self.phase = decision.phase;
++        self.wake.broadcast(io);
++        return .applied;
++    }
++
++    fn is_active(self: *FetchBridge, handle: fetch_state.Handle) bool {
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        return fetch_state.is_active(self.phase, handle);
++    }
++
++    fn abort(self: *FetchBridge) void {
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        const decision = fetch_state.decide(self.phase, .cancel);
++        self.clearPendingRequest("abort");
++        self.phase = decision.phase;
++        self.wake.broadcast(io);
++    }
++
++    fn shutdown(self: *FetchBridge) void {
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        defer self.mutex.unlock(io);
++        const decision = fetch_state.decide(self.phase, .shutdown);
++        self.clearPendingRequest("shutdown");
++        self.phase = decision.phase;
++        self.wake.broadcast(io);
++    }
++
++    fn deinit(self: *FetchBridge) void {
++        self.request.deinit(std.heap.c_allocator);
++        self.response.deinit(std.heap.c_allocator);
++    }
++};
++
++pub const FetchOperationResult = enum(u8) {
++    stale = 0,
++    applied = 1,
++    backpressure = 2,
++};
++
++pub const Runtime = struct {
++    alloc: Allocator,
++    fetch: FetchBridge = .{},
++    stream_context: host_stream_provider.ProviderContext = undefined,
++    input: InputQueue = .{},
++    output: OutputQueue = .{},
++    credential: []u8,
++    model: ?[]u8,
++    home: []u8,
++    workspace_root: []u8,
++    gateway_chat_url: []u8,
++    thread: std.Thread,
++    exited: std.atomic.Value(bool) = .init(false),
++    exit_code: std.atomic.Value(u8) = .init(0),
++
++    fn readInput(context: ?*anyopaque, destination: []u8) usize {
++        const self: *Runtime = @ptrCast(@alignCast(context.?));
++        return self.input.read(self.alloc, destination);
++    }
++
++    fn writeOutput(context: ?*anyopaque, bytes: []const u8) !void {
++        const self: *Runtime = @ptrCast(@alignCast(context.?));
++        self.output.write(self.alloc, bytes) catch |err| {
++            debug_trace.logf("napi", "native output failed err={s}", .{@errorName(err)});
++            self.exit_code.store(1, .seq_cst);
++            return err;
++        };
++    }
++
++    fn run(self: *Runtime) void {
++        const provider = gateway_provider.Provider{
++            .oauth_transport = oauth_transport.unavailable_provider,
++            .chat_url = builtin_gateway.provider.chat_url,
++        };
++        var gateway = builtin_gateway.provider_bundle;
++        gateway.agent_stream = host_stream_provider.provider(&self.stream_context);
++        gateway.permission_reviewer = null;
++        const providers = provider_set.gateway_only(gateway);
++        acp_server.runWithTransport(
++            self.alloc,
++            .{
++                .default_model = builtin_gateway.default_model,
++                .default_agent_step_limit = 64,
++                .gateway_retry_count = 0,
++                .gateway_chat_url = self.gateway_chat_url,
++                .gateway_models_path = builtin_gateway.models_path,
++                .gateway_provider = provider,
++                .provider_set = providers,
++                .background_process_provider = background_process_provider.unavailable_provider,
++                .secret_store = host.unavailable_secret_store,
++                .prompt_policy = builtin_context.prompt_policy,
++                .ignored_list_entries = &.{},
++                .max_list_entries = 0,
++                .max_read_file_bytes = 0,
++                .max_read_file_lines = 0,
++                .max_read_file_line_len = 0,
++                .max_command_output_bytes = 0,
++                .max_tool_result_bytes = 64 * 1024,
++                .max_history_turns = 100,
++                .context_registry = .{ .default_provider = builtin_context.provider },
++                .mode_registry = builtin_modes.registry,
++                .credential_override = self.credential,
++                .model_override = self.model,
++                .home_override = self.home,
++                .workspace_root_override = self.workspace_root,
++                .allow_acp_mcp = false,
++                .allow_native_tools = false,
++            },
++            jsonrpc.Reader.initCallback(self, Runtime.readInput),
++            jsonrpc.Writer.initCallback(self, Runtime.writeOutput),
++        ) catch |err| {
++            debug_trace.logf("napi", "native runtime failed err={s}", .{@errorName(err)});
++            self.exit_code.store(1, .seq_cst);
++        };
++        self.exited.store(true, .seq_cst);
++    }
++
++    fn closeInput(self: *Runtime) void {
++        self.input.close();
++    }
++
++    fn abortHostEffects(self: *Runtime) void {
++        self.fetch.abort();
++    }
++
++    fn deinit(self: *Runtime) void {
++        self.closeInput();
++        self.fetch.shutdown();
++        self.thread.join();
++        self.fetch.deinit();
++        self.input.deinit(self.alloc);
++        self.output.deinit(self.alloc);
++        self.alloc.free(self.credential);
++        if (self.model) |model| self.alloc.free(model);
++        self.alloc.free(self.home);
++        self.alloc.free(self.workspace_root);
++        self.alloc.free(self.gateway_chat_url);
++        self.alloc.destroy(self);
++        releaseRuntimeSlot();
++    }
++};
++
++const RuntimeHandle = struct {
++    mutex: std.Io.Mutex = .init,
++    runtime: ?*Runtime,
++
++    fn destroy(self: *RuntimeHandle) void {
++        const io = io_mod.getIo();
++        self.mutex.lockUncancelable(io);
++        const runtime = self.runtime;
++        self.runtime = null;
++        self.mutex.unlock(io);
++        if (runtime) |value| value.deinit();
++    }
++};
++
++var threaded_io: ?std.Io.Threaded = null;
++var threaded_io_state: std.atomic.Value(u8) = .init(0);
++var active_runtime_count: std.atomic.Value(usize) = .init(0);
++
++fn claimRuntimeSlot() bool {
++    var current = active_runtime_count.load(.acquire);
++    while (current < max_active_runtimes) {
++        if (active_runtime_count.cmpxchgWeak(current, current + 1, .acq_rel, .acquire)) |observed| {
++            current = observed;
++        } else return true;
++    }
++    return false;
++}
++
++fn releaseRuntimeSlot() void {
++    _ = active_runtime_count.fetchSub(1, .acq_rel);
++}
++
++fn ensureThreadedIo() void {
++    if (threaded_io_state.cmpxchgStrong(0, 1, .acq_rel, .acquire) == null) {
++        threaded_io = std.Io.Threaded.init(std.heap.c_allocator, .{});
++        io_mod.setIo(threaded_io.?.io());
++        const raw_environ: io_mod.RawEnviron = @ptrCast(std.c.environ);
++        io_mod.setRawEnviron(raw_environ);
++        const workspace_root = io_mod.realpathAlloc(std.heap.c_allocator, ".") catch null;
++        defer if (workspace_root) |path| std.heap.c_allocator.free(path);
++        debug_trace.configureFromEnv(std.heap.c_allocator, workspace_root orelse ".");
++        threaded_io_state.store(2, .release);
++        return;
++    }
++    while (threaded_io_state.load(.acquire) != 2) std.atomic.spinLoopHint();
++}
++
++pub const abi_version: u32 = 1;
++
++pub const Options = struct {
++    credential: []const u8,
++    model: ?[]const u8 = null,
++    home: []const u8,
++    workspace_root: []const u8,
++    gateway_chat_url: ?[]const u8 = null,
++};
++
++pub const CreateError = error{
++    TooManyRuntimes,
++    InvalidApiKey,
++    InvalidModel,
++    InvalidHome,
++    InvalidWorkspaceRoot,
++    InvalidGatewayUrl,
++    OutOfMemory,
++    ThreadFailed,
++};
++
++pub fn create(options: Options) CreateError!*Runtime {
++    ensureThreadedIo();
++    if (!claimRuntimeSlot()) return error.TooManyRuntimes;
++    errdefer releaseRuntimeSlot();
++    const alloc = std.heap.c_allocator;
++    if (options.credential.len == 0 or options.credential.len > max_api_key_bytes) return error.InvalidApiKey;
++    if (options.model) |value| if (value.len == 0 or value.len > max_model_bytes) return error.InvalidModel;
++    if (options.home.len == 0 or options.home.len > max_path_bytes) return error.InvalidHome;
++    if (options.workspace_root.len == 0 or options.workspace_root.len > max_path_bytes) return error.InvalidWorkspaceRoot;
++    const url = options.gateway_chat_url orelse builtin_gateway.default_chat_url;
++    if (url.len == 0 or url.len > max_url_bytes) return error.InvalidGatewayUrl;
++    streamable_http.validateEndpoint(url) catch return error.InvalidGatewayUrl;
++    if (!std.mem.eql(u8, url, builtin_gateway.default_chat_url)) {
++        const uri = std.Uri.parse(url) catch return error.InvalidGatewayUrl;
++        if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.InvalidGatewayUrl;
++    }
++    const credential = alloc.dupe(u8, options.credential) catch return error.OutOfMemory;
++    errdefer alloc.free(credential);
++    const model = if (options.model) |value| alloc.dupe(u8, value) catch return error.OutOfMemory else null;
++    errdefer if (model) |value| alloc.free(value);
++    const home = alloc.dupe(u8, options.home) catch return error.OutOfMemory;
++    errdefer alloc.free(home);
++    const workspace_root = alloc.dupe(u8, options.workspace_root) catch return error.OutOfMemory;
++    errdefer alloc.free(workspace_root);
++    const gateway_chat_url = alloc.dupe(u8, url) catch return error.OutOfMemory;
++    errdefer alloc.free(gateway_chat_url);
++    const runtime = alloc.create(Runtime) catch return error.OutOfMemory;
++    errdefer alloc.destroy(runtime);
++    runtime.* = .{ .alloc = alloc, .credential = credential, .model = model, .home = home, .workspace_root = workspace_root, .gateway_chat_url = gateway_chat_url, .thread = undefined };
++    runtime.stream_context = host_stream_provider.initContext(builtin_gateway.buildAgentRequest, .{ .fixed = runtime.gateway_chat_url }, .{
++        .context = &runtime.fetch,
++        .open_fn = FetchBridge.open,
++        .status_fn = FetchBridge.statusFn,
++        .next_fn = FetchBridge.next,
++        .close_fn = FetchBridge.close,
++    });
++    runtime.thread = std.Thread.spawn(.{}, Runtime.run, .{runtime}) catch return error.ThreadFailed;
++    return runtime;
++}
++
++pub fn destroy(runtime: *Runtime) void {
++    runtime.deinit();
++}
++pub fn write(runtime: *Runtime, bytes: []const u8) !void {
++    try runtime.input.write(runtime.alloc, bytes);
++}
++pub fn closeInput(runtime: *Runtime) void {
++    runtime.closeInput();
++}
++pub fn drain(runtime: *Runtime, destination: []u8) usize {
++    return runtime.output.drain(destination);
++}
++pub fn outputAvailable(runtime: *Runtime) usize {
++    return runtime.output.available();
++}
++pub fn takeFetch(runtime: *Runtime, destination: []u8) isize {
++    const io = io_mod.getIo();
++    runtime.fetch.mutex.lockUncancelable(io);
++    defer runtime.fetch.mutex.unlock(io);
++    const decision = fetch_state.decide(runtime.fetch.phase, .take_request);
++    if (decision.action != .applied) return 0;
++    const len = runtime.fetch.request.items.len;
++    if (len > destination.len) return -@as(isize, @intCast(len));
++    @memcpy(destination[0..len], runtime.fetch.request.items);
++    runtime.fetch.request.clearRetainingCapacity();
++    runtime.fetch.phase = decision.phase;
++    return @intCast(len);
++}
++pub fn fetchActive(runtime: *Runtime, handle: i32) bool {
++    return runtime.fetch.is_active(handle);
++}
++pub fn startFetch(runtime: *Runtime, handle: i32, status: u16) FetchOperationResult {
++    return runtime.fetch.startResponse(handle, status);
++}
++pub fn pushFetch(runtime: *Runtime, handle: i32, bytes: []const u8) !FetchOperationResult {
++    return runtime.fetch.pushResponse(handle, bytes);
++}
++pub fn finishFetch(runtime: *Runtime, handle: i32) FetchOperationResult {
++    return runtime.fetch.finishResponse(handle);
++}
++pub fn failFetch(runtime: *Runtime, handle: i32) FetchOperationResult {
++    return runtime.fetch.failResponse(handle);
++}
++pub fn abortFetch(runtime: *Runtime) void {
++    runtime.abortHostEffects();
++}
++pub fn exited(runtime: *Runtime) bool {
++    return runtime.exited.load(.seq_cst);
++}
++pub fn exitCode(runtime: *Runtime) u8 {
++    return runtime.exit_code.load(.seq_cst);
++}

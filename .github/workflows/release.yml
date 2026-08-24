@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version without a v prefix
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: swift-fx-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - name: Validate version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(git branch --show-current)" = main
+          ! git rev-parse "$VERSION" >/dev/null 2>&1
+      - name: Build XCFramework
+        run: Scripts/build-xcframework.sh
+      - name: Validate artifact
+        run: |
+          lipo -info Artifacts/FXCore.xcframework/macos-arm64_x86_64/CFX.framework/CFX | grep 'x86_64 arm64'
+          test "$(swift package compute-checksum Artifacts/FXCore.xcframework.zip)" = "$(cat Artifacts/FXCore.xcframework.zip.sha256)"
+      - name: Smoke-test local binary target
+        run: |
+          cp Package.swift /tmp/Package.release.swift
+          Scripts/use-local-artifact.sh
+          swift build
+          swift run FXTests
+          mv /tmp/Package.release.swift Package.swift
+      - name: Update release manifest
+        env:
+          VERSION: ${{ inputs.version }}
+        run: Scripts/update-manifest.sh "$VERSION" "$(cat Artifacts/FXCore.xcframework.zip.sha256)"
+      - name: Commit and tag release
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Package.swift
+          git commit -m "Release $VERSION"
+          git tag "$VERSION"
+          git push origin HEAD:main "$VERSION"
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release create "$VERSION" \
+            Artifacts/FXCore.xcframework.zip \
+            Artifacts/FXCore.xcframework.zip.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$VERSION" \
+            --generate-notes \
+            --verify-tag
